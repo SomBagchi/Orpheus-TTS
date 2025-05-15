@@ -1,3 +1,34 @@
+"""
+Voice Cloning Training with Masked Loss
+======================================
+
+This script implements a custom voice cloning trainer with masked loss functionality.
+The loss calculation focuses only on tokens after a specified position in the sequence.
+
+Example Usage:
+-------------
+
+# Basic usage - train with all data
+python voice_cloning/voice_clone.py --config voice_cloning/config.yaml
+
+# Quick test with limited data (5 samples)
+python voice_cloning/voice_clone.py --config voice_cloning/config.yaml --max-samples 5
+
+# Quick test with 20 samples
+python voice_cloning/voice_clone.py --config voice_cloning/config.yaml --max-samples 20
+
+The script works by:
+1. Loading a pre-trained model
+2. Implementing a custom masked loss function
+3. Only calculating loss on tokens after the start_of_speech_pos
+4. Optionally weighting early speech tokens higher than later ones
+
+See config.yaml for configurable parameters including:
+- weighted_loss: Whether to use weighted loss
+- higher_weight_tokens: Number of tokens to apply higher weight to
+- higher_weight_factor: Weight multiplier for these tokens
+"""
+
 import torch
 from transformers import Trainer, AutoModelForCausalLM, AutoTokenizer, TrainingArguments
 from datasets import load_from_disk
@@ -5,6 +36,8 @@ import yaml
 import os
 import numpy as np
 from typing import Dict, List, Optional, Tuple, Union, Any
+import wandb
+import argparse
 
 class VoiceCloningTrainer(Trainer):
     """
@@ -87,12 +120,13 @@ class VoiceCloningTrainer(Trainer):
             return loss, outputs
         return loss
 
-def train_voice_cloning_model(config_path):
+def train_voice_cloning_model(config_path, max_samples=None):
     """
     Train a model for voice cloning using the VoiceCloningTrainer
     
     Args:
         config_path: Path to the configuration YAML file
+        max_samples: Maximum number of samples to use (for debugging)
     """
     # Load configuration
     with open(config_path, 'r') as file:
@@ -101,6 +135,22 @@ def train_voice_cloning_model(config_path):
     # Load the dataset
     train_dataset = load_from_disk(config["train_dataset_path"])
     eval_dataset = load_from_disk(config["eval_dataset_path"]) if "eval_dataset_path" in config else None
+    
+    # Limit dataset size for quick testing if specified
+    if max_samples is not None and max_samples > 0:
+        print(f"Debug mode: Limiting training dataset to {max_samples} samples")
+        train_dataset = train_dataset.select(range(min(max_samples, len(train_dataset))))
+        
+        if eval_dataset is not None:
+            # Also limit eval dataset to a small number for quick testing
+            eval_samples = min(max(2, max_samples // 5), len(eval_dataset))
+            print(f"Debug mode: Limiting evaluation dataset to {eval_samples} samples")
+            eval_dataset = eval_dataset.select(range(eval_samples))
+    
+    # Print dataset info
+    print(f"Training dataset size: {len(train_dataset)}")
+    if eval_dataset:
+        print(f"Evaluation dataset size: {len(eval_dataset)}")
     
     # Load model and tokenizer
     model = AutoModelForCausalLM.from_pretrained(
@@ -120,16 +170,28 @@ def train_voice_cloning_model(config_path):
         learning_rate=config["learning_rate"],
         bf16=config.get("bf16", True),
         logging_steps=config.get("logging_steps", 10),
-        report_to=config.get("report_to", "none"),
+        report_to=config.get("report_to", "wandb"),  # Default to wandb
         remove_unused_columns=True,
     )
+    
+    # Initialize wandb if using it
+    if training_args.report_to == ["wandb"]:
+        run_name = config.get("run_name", "voice-clone-run")
+        if max_samples:
+            run_name += f"-debug-{max_samples}"
+            
+        wandb.init(
+            project=config.get("project_name", "voice-cloning"), 
+            name=run_name,
+            config=config
+        )
     
     # Create the VoiceCloningTrainer
     trainer = VoiceCloningTrainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
-        eval_dataset=eval_dataset,
+        # eval_dataset=eval_dataset,
         tokenizer=tokenizer,
         weighted_loss=config.get("weighted_loss", False),
         higher_weight_tokens=config.get("higher_weight_tokens", 50),
@@ -140,18 +202,26 @@ def train_voice_cloning_model(config_path):
     trainer.train()
     
     # Save the model
-    model.save_pretrained(os.path.join(config["output_dir"], "final_model"))
-    tokenizer.save_pretrained(os.path.join(config["output_dir"], "final_model"))
+    if max_samples is None or max_samples > 10:  # Only save model if not in minimal debug mode
+        output_dir = os.path.join(config["output_dir"], "final_model")
+        if max_samples:
+            output_dir += f"_debug_{max_samples}"
+        
+        model.save_pretrained(output_dir)
+        tokenizer.save_pretrained(output_dir)
+        print(f"Model saved to {output_dir}")
 
     # After training
-    eval_results = trainer.evaluate()
-    print(f"Evaluation results: {eval_results}")
+    if eval_dataset:
+        print("Running evaluation...")
+        eval_results = trainer.evaluate()
+        print(f"Evaluation results: {eval_results}")
 
 if __name__ == "__main__":
-    import argparse
-    
     parser = argparse.ArgumentParser(description="Train a model for voice cloning")
     parser.add_argument("--config", type=str, default="voice_cloning/config.yaml", help="Path to the config file")
+    parser.add_argument("--max-samples", type=int, default=None, 
+                        help="Maximum number of training samples to use (for debugging)")
     args = parser.parse_args()
     
-    train_voice_cloning_model(args.config)
+    train_voice_cloning_model(args.config, args.max_samples)

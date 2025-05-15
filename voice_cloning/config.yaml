@@ -1,30 +1,16 @@
-# Model configuration
+TTS_dataset: "voice_cloning_train"
+
 model_name: "canopylabs/orpheus-tts-0.1-pretrained"
 
-# Dataset paths (these should be generated using the data_processing.py script)
-train_dataset_path: "voice_cloning_train"
-eval_dataset_path: "voice_cloning_val"
-
-# Training parameters
+# Training Args
 epochs: 3
 batch_size: 1
-save_steps: 500
-learning_rate: 5.0e-5
-bf16: true
-use_flash_attention: true
-logging_steps: 10
-
-# Loss customization
-# Set weighted_loss to true to enable higher weights for first tokens after speech position
-weighted_loss: false
-higher_weight_tokens: 50  # Number of tokens to apply higher weight to
-higher_weight_factor: 1.0  # Weight factor for these tokens
-
-# Output settings
-output_dir: "voice_cloning/models"
-overwrite_output_dir: true
-save_total_limit: 3
-report_to: "wandb"  # Set to "wandb" if you have wandb installed 
-
 number_processes: 1
 pad_token: 128263
+save_steps: 5000
+learning_rate: 5.0e-5
+
+# Naming and paths
+save_folder: "voice_cloning/models"
+project_name: "voice-cloning"
+run_name: "voice-cloning"

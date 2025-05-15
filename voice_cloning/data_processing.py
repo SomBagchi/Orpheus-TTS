@@ -296,6 +296,8 @@ def parse_args():
     parser.add_argument('--debug', action='store_true', help='Print debug information')
     parser.add_argument('--show-prompt-format', action='store_true', help='Show a debug prompt format example')
     parser.add_argument('--force-cpu', action='store_true', help='Force CPU usage (for CUDA compatibility issues)')
+    parser.add_argument('--val-split', type=float, default=0.1, help='Validation split ratio (0.1 = 10%)')
+    parser.add_argument('--split-by-speaker', action='store_true', help='Split train/val by speaker rather than by samples')
     return parser.parse_args()
 
 def main():
@@ -310,12 +312,13 @@ def main():
     device = get_device(force_cpu=args.force_cpu)
     
     # Show debug prompt format example if requested
-    if args.show_prompt_format:
+    if args.show_prompt_format and args.test:
         print("\n=== Testing prompt format with debug example ===")
         debug_prompt = create_debug_prompt()
         print_tokenized_prompt(debug_prompt)
-        if not args.test:
-            return
+    elif args.show_prompt_format:
+        print("\n=== Skipping prompt format example (only shown in test mode) ===")
+        print("Use --test flag together with --show-prompt-format to see tokenized prompts")
     
     print("Loading dataset...")
     # Load the dataset
@@ -464,32 +467,82 @@ def main():
     
     # Save the pairs examples
     if total_pairs_created > 0:
-        # Convert to the required HuggingFace dataset format
+        # Split data into training and validation sets
+        val_split = min(max(0.0, args.val_split), 0.5)  # Ensure val_split is between 0 and 0.5
+        print(f"Using validation split of {val_split:.1%}")
         
-        # Prepare data in the required format
-        hf_data = {
-            'input_ids': [],
-            'labels': [],
-            'attention_mask': []
-        }
+        if args.split_by_speaker:
+            # Split by speaker
+            print("Splitting train/val by speaker")
+            speakers_list = list(speakers_used)
+            random.shuffle(speakers_list)
+            
+            val_speakers_count = max(1, int(len(speakers_list) * val_split))
+            val_speakers = set(speakers_list[:val_speakers_count])
+            
+            train_pairs = [ex for ex in pairs_examples if ex['episode_id'] not in val_speakers]
+            val_pairs = [ex for ex in pairs_examples if ex['episode_id'] in val_speakers]
+            
+            print(f"Split by speaker: {len(val_speakers)} validation speakers, {len(speakers_used) - len(val_speakers)} training speakers")
+        else:
+            # Split by samples
+            print("Splitting train/val by samples")
+            random.shuffle(pairs_examples)
+            val_count = max(1, int(len(pairs_examples) * val_split))
+            
+            val_pairs = pairs_examples[:val_count]
+            train_pairs = pairs_examples[val_count:]
         
-        for example in pairs_examples:
-            tokens = example['tokens']
-            hf_data['input_ids'].append(tokens)
-            hf_data['labels'].append(tokens)  # Same as input_ids
-            hf_data['attention_mask'].append([1] * len(tokens))
+        print(f"Created train split with {len(train_pairs)} samples")
+        print(f"Created validation split with {len(val_pairs)} samples")
         
-        # Create HuggingFace dataset
-        hf_dataset = Dataset.from_dict(hf_data)
+        # Function to convert pairs to HuggingFace dataset format
+        def pairs_to_hf_dataset(pairs):
+            hf_data = {
+                'input_ids': [],
+                'labels': [],
+                'attention_mask': [],
+                'episode_id': [],
+                'start_of_speech_pos': []  # New field for start of speech position
+            }
+            
+            # Special token ID for start_of_speech
+            start_of_speech = 128257
+            
+            for example in pairs:
+                tokens = example['tokens']
+                
+                # Find the position of the second start_of_speech token (for the sample speech)
+                # The first one is for reference speech, the second one is for sample speech
+                speech_positions = [i for i, t in enumerate(tokens) if t == start_of_speech]
+                sample_speech_pos = speech_positions[1] if len(speech_positions) >= 2 else -1
+                
+                hf_data['input_ids'].append(tokens)
+                hf_data['labels'].append(tokens)  # Same as input_ids
+                hf_data['attention_mask'].append([1] * len(tokens))
+                hf_data['episode_id'].append(example['episode_id'])
+                hf_data['start_of_speech_pos'].append(sample_speech_pos)
+            
+            return Dataset.from_dict(hf_data)
         
-        # Save the dataset
-        output_path = f"{args.output_dir}/voice_cloning_dataset"
-        hf_dataset.save_to_disk(output_path)
-        print(f"HuggingFace dataset saved to {output_path}")
+        # Create and save training dataset
+        train_dataset = pairs_to_hf_dataset(train_pairs)
+        train_output_path = f"{args.output_dir}/voice_cloning_train"
+        train_dataset.save_to_disk(train_output_path)
+        print(f"Training dataset saved to {train_output_path}")
         
-        # Also save the original pairs data for reference
+        # Create and save validation dataset
+        val_dataset = pairs_to_hf_dataset(val_pairs)
+        val_output_path = f"{args.output_dir}/voice_cloning_val"
+        val_dataset.save_to_disk(val_output_path)
+        print(f"Validation dataset saved to {val_output_path}")
+        
+        # Save the original pairs data for reference
         torch_output_path = f"{args.output_dir}/voice_cloning_pairs.pt"
-        torch.save(pairs_examples, torch_output_path)
+        torch.save({
+            'train': train_pairs,
+            'val': val_pairs
+        }, torch_output_path)
         print(f"Original paired data also saved to {torch_output_path}")
     else:
         print("No pairs were created, skipping file save")

@@ -1,6 +1,37 @@
+"""
+Voice Cloning Data Processing Script
+===================================
+
+This script processes the "SomBagchi/orpheus_voice_cloning" dataset, creating paired examples
+from the same speaker for voice cloning tasks.
+
+Example Usage:
+-------------
+
+# Process full dataset (WARNING: This will take a long time and requires significant compute resources)
+python data_processing.py --output-dir ./processed_data
+
+# Test mode with 5 speakers (default)
+python data_processing.py --test --output-dir ./test_data
+
+# Test mode with specific number of speakers
+python data_processing.py --test --speakers 10 --output-dir ./test_data
+
+# Debug mode (shows additional processing information)
+python data_processing.py --test --debug --output-dir ./test_debug
+
+# Show prompt format example (useful for checking the tokenization structure)
+python data_processing.py --show-prompt-format
+
+# Test mode + debug + viewing prompt format
+python data_processing.py --test --debug --show-prompt-format --output-dir ./test_data
+
+# Force CPU usage (use when CUDA compatibility issues occur)
+python data_processing.py --test --debug --force-cpu --output-dir ./test_data
+"""
+
 import torch
 import numpy as np
-import torchaudio
 import torchaudio.transforms as T
 from datasets import load_dataset
 from transformers import AutoTokenizer
@@ -9,16 +40,47 @@ import random
 from tqdm import tqdm
 from collections import defaultdict
 import argparse
+import os
+import sys
+from datasets import Dataset
 
-# Load the SNAC model for audio tokenization
-model = SNAC.from_pretrained("hubertsiuzdak/snac_24khz").eval()
-model = model.to("cuda" if torch.cuda.is_available() else "cpu")
+def get_device(force_cpu=False):
+    """Determine device to use (CPU or CUDA)"""
+    if force_cpu:
+        print("Forcing CPU usage as requested")
+        return "cpu"
+    
+    if torch.cuda.is_available():
+        try:
+            # Test if CUDA is actually working
+            test_tensor = torch.zeros(1).cuda()
+            del test_tensor
+            print("Using CUDA for audio processing")
+            return "cuda"
+        except Exception as e:
+            print(f"CUDA error detected during initialization: {e}")
+            print("Falling back to CPU")
+            return "cpu"
+    else:
+        print("CUDA not available, using CPU")
+        return "cpu"
 
 # Load the text tokenizer
 tokenizer = AutoTokenizer.from_pretrained("canopylabs/orpheus-3b-0.1-pretrained")
 
 # Function to tokenize audio waveforms
-def tokenise_audio(waveform, ds_sample_rate=16000):
+def tokenise_audio(waveform, ds_sample_rate=16000, device="cpu"):
+    # Load the SNAC model for audio tokenization if not already loaded
+    global model
+    if 'model' not in globals():
+        try:
+            model = SNAC.from_pretrained("hubertsiuzdak/snac_24khz").eval()
+            model = model.to(device)
+        except Exception as e:
+            print(f"Error loading SNAC model: {e}")
+            print("If this is a CUDA error, try using --force-cpu")
+            sys.exit(1)
+            
     # Ensure the input is a numpy array
     if not isinstance(waveform, np.ndarray):
         waveform = np.array(waveform)
@@ -31,7 +93,7 @@ def tokenise_audio(waveform, ds_sample_rate=16000):
     resample_transform = T.Resample(orig_freq=ds_sample_rate, new_freq=24000)
     waveform = resample_transform(waveform)
 
-    waveform = waveform.unsqueeze(0).to("cuda" if torch.cuda.is_available() else "cpu")
+    waveform = waveform.unsqueeze(0).to(device)
 
     # Generate the codes from SNAC
     with torch.inference_mode():
@@ -51,25 +113,178 @@ def tokenise_audio(waveform, ds_sample_rate=16000):
 
 # Function to create a tokenized prompt
 def create_tokenized_prompt(ref_text, ref_audio_tokens, sample_text, sample_audio_tokens):
-    # Tokenize reference text
-    ref_text_tokens = tokenizer.encode(f"Reference text: {ref_text}", add_special_tokens=False)
+    # Special token IDs
+    tokeniser_length = 128256
+    start_of_text = 128000
+    end_of_text = 128009
     
-    # Create the reference audio string
-    ref_audio_str = "Reference audio:"
-    ref_audio_tokens_str = tokenizer.encode(ref_audio_str, add_special_tokens=False)
+    start_of_speech = tokeniser_length + 1  # 128257
+    end_of_speech = tokeniser_length + 2    # 128258
     
-    # Tokenize sample text
-    sample_text_tokens = tokenizer.encode(f"Sample text: {sample_text}", add_special_tokens=False)
+    start_of_human = tokeniser_length + 3   # 128259
+    end_of_human = tokeniser_length + 4     # 128260
     
-    # Create the sample audio string
-    sample_audio_str = "Sample audio:"
-    sample_audio_tokens_str = tokenizer.encode(sample_audio_str, add_special_tokens=False)
+    start_of_ai = tokeniser_length + 5      # 128261
+    end_of_ai = tokeniser_length + 6        # 128262
     
-    # Combine all tokens - no need to tokenize the audio tokens, they're already tokens
-    all_tokens = ref_text_tokens + [tokenizer.convert_tokens_to_ids("\n")] + \
-                 ref_audio_tokens_str + ref_audio_tokens + [tokenizer.convert_tokens_to_ids("\n")] + \
-                 sample_text_tokens + [tokenizer.convert_tokens_to_ids("\n")] + \
-                 sample_audio_tokens_str + sample_audio_tokens
+    # Tokenize the reference and sample text
+    ref_text_with_prefix = f"Reference text: {ref_text}\nReference speech: "
+    ref_text_tokens = tokenizer.encode(ref_text_with_prefix, add_special_tokens=False)
+    
+    sample_text_with_prefix = f"\nSample text: {sample_text}\nSample speech: "
+    sample_text_tokens = tokenizer.encode(sample_text_with_prefix, add_special_tokens=False)
+    
+    # Build the full token sequence according to the specified template
+    all_tokens = [
+        start_of_human, start_of_text,
+        *ref_text_tokens,
+        end_of_text, end_of_human,
+        
+        start_of_ai, start_of_speech,
+        *ref_audio_tokens,
+        end_of_speech, end_of_ai,
+        
+        start_of_human, start_of_text,
+        *sample_text_tokens,
+        end_of_text, end_of_human,
+        
+        start_of_ai, start_of_speech,
+        *sample_audio_tokens,
+        end_of_speech, end_of_ai
+    ]
+    
+    return all_tokens
+
+# Function to print tokenized prompt in a readable format for debugging
+def print_tokenized_prompt(tokens):
+    # Special token names for readability
+    special_tokens = {
+        128000: "<START_OF_TEXT>",
+        128009: "<END_OF_TEXT>",
+        128257: "<START_OF_SPEECH>",
+        128258: "<END_OF_SPEECH>",
+        128259: "<START_OF_HUMAN>",
+        128260: "<END_OF_HUMAN>",
+        128261: "<START_OF_AI>",
+        128262: "<END_OF_AI>"
+    }
+    
+    print("\n===== TOKENIZED PROMPT (FULL) =====")
+    print(f"Total tokens: {len(tokens)}")
+    
+    # Print all tokens with their values and meanings
+    print("\nToken-by-token breakdown:")
+    
+    section_name = "unknown"
+    current_section_tokens = []
+    text_tokens = []
+    
+    for i, token in enumerate(tokens):
+        # Handle special tokens that mark sections
+        if token in special_tokens:
+            # If we're ending a text section, decode and print the collected tokens
+            if token == 128009 and text_tokens:  # END_OF_TEXT
+                try:
+                    decoded_text = tokenizer.decode(text_tokens)
+                    print(f"   Text content: \"{decoded_text}\"")
+                except:
+                    print(f"   Text content: <could not decode>")
+                text_tokens = []
+            
+            # Print the special token
+            print(f"\n[{i}] {token} - {special_tokens[token]}")
+            
+            # Update section tracking
+            if token == 128259:  # START_OF_HUMAN
+                section_name = "HUMAN"
+                current_section_tokens = []
+            elif token == 128261:  # START_OF_AI
+                section_name = "AI"
+                current_section_tokens = []
+            elif token == 128000:  # START_OF_TEXT
+                section_name = "TEXT"
+                text_tokens = []
+            elif token == 128257:  # START_OF_SPEECH
+                section_name = "SPEECH"
+                print("   Speech tokens:")
+        
+        # Handle regular tokens
+        else:
+            if section_name == "TEXT":
+                # For text sections, collect tokens for later decoding
+                text_tokens.append(token)
+                print(f"   [{i}] {token} - text token")
+            elif section_name == "SPEECH":
+                # For speech sections, just print the token
+                print(f"   [{i}] {token} - audio token")
+            else:
+                # For other sections
+                print(f"   [{i}] {token} - {section_name} section token")
+    
+    # Print summary of sections
+    sections = [
+        (0, "Start of prompt"),
+        (tokens.index(128260) if 128260 in tokens else -1, "End of human reference text"),
+        (tokens.index(128258) if 128258 in tokens else -1, "End of AI reference speech"),
+        (tokens.index(128260, tokens.index(128258) + 1) if 128258 in tokens and 128260 in tokens[tokens.index(128258) + 1:] else -1, "End of human sample text"),
+        (len(tokens) - 1, "End of prompt")
+    ]
+    
+    print("\n\nSection lengths:")
+    for i, (pos, label) in enumerate(sections):
+        if i > 0 and pos > 0 and sections[i-1][0] >= 0:
+            prev_pos = sections[i-1][0]
+            section_len = pos - prev_pos
+            print(f"- {label}: {section_len} tokens")
+            
+    print("\n==============================")
+
+# Function to create a test/debug prompt with limited tokens to check format
+def create_debug_prompt():
+    # Special token IDs
+    tokeniser_length = 128256
+    start_of_text = 128000
+    end_of_text = 128009
+    
+    start_of_speech = tokeniser_length + 1  # 128257
+    end_of_speech = tokeniser_length + 2    # 128258
+    
+    start_of_human = tokeniser_length + 3   # 128259
+    end_of_human = tokeniser_length + 4     # 128260
+    
+    start_of_ai = tokeniser_length + 5      # 128261
+    end_of_ai = tokeniser_length + 6        # 128262
+    
+    # Short example texts
+    ref_text = "Hello world"
+    sample_text = "Testing the voice cloning"
+    
+    # Tokenize texts
+    ref_text_tokens = tokenizer.encode(f"Reference text: {ref_text}\nReference speech: ", add_special_tokens=False)
+    sample_text_tokens = tokenizer.encode(f"\nSample text: {sample_text}\nSample speech: ", add_special_tokens=False)
+    
+    # Create mock audio tokens (just a few for demonstration)
+    ref_audio_tokens = [128266 + i for i in range(10)]
+    sample_audio_tokens = [128266 + 100 + i for i in range(10)]
+    
+    # Build the full token sequence
+    all_tokens = [
+        start_of_human, start_of_text,
+        *ref_text_tokens,
+        end_of_text, end_of_human,
+        
+        start_of_ai, start_of_speech,
+        *ref_audio_tokens,
+        end_of_speech, end_of_ai,
+        
+        start_of_human, start_of_text,
+        *sample_text_tokens,
+        end_of_text, end_of_human,
+        
+        start_of_ai, start_of_speech,
+        *sample_audio_tokens,
+        end_of_speech, end_of_ai
+    ]
     
     return all_tokens
 
@@ -79,10 +294,28 @@ def parse_args():
     parser.add_argument('--speakers', type=int, default=5, help='Number of speakers to process in test mode')
     parser.add_argument('--output-dir', type=str, default='.', help='Directory to save processed files')
     parser.add_argument('--debug', action='store_true', help='Print debug information')
+    parser.add_argument('--show-prompt-format', action='store_true', help='Show a debug prompt format example')
+    parser.add_argument('--force-cpu', action='store_true', help='Force CPU usage (for CUDA compatibility issues)')
     return parser.parse_args()
 
 def main():
     args = parse_args()
+    
+    # Ensure output directory exists
+    if args.output_dir:
+        os.makedirs(args.output_dir, exist_ok=True)
+        print(f"Output directory: {args.output_dir} (created if it didn't exist)")
+    
+    # Determine device to use (CPU or CUDA)
+    device = get_device(force_cpu=args.force_cpu)
+    
+    # Show debug prompt format example if requested
+    if args.show_prompt_format:
+        print("\n=== Testing prompt format with debug example ===")
+        debug_prompt = create_debug_prompt()
+        print_tokenized_prompt(debug_prompt)
+        if not args.test:
+            return
     
     print("Loading dataset...")
     # Load the dataset
@@ -136,63 +369,11 @@ def main():
     else:
         print("Processing all speakers")
     
-    # Create a list to store our processed examples
-    processed_examples = []
-    
-    # Process each selected speaker's examples
-    for speaker in tqdm(sorted_speakers, desc="Processing speakers"):
-        example_indices = speaker_examples[speaker]
-        
-        # Process each example for this speaker
-        for idx in example_indices:
-            try:
-                example = dataset['train'][idx]
-                
-                # Debug information about the audio
-                if args.debug:
-                    print(f"\nProcessing example idx={idx}, speaker={speaker}, uuid={example['uuid']}")
-                    print(f"Audio type: {type(example['audio'])}")
-                    print(f"Audio keys: {example['audio'].keys() if isinstance(example['audio'], dict) else 'Not a dict'}")
-                    if isinstance(example['audio'], dict) and 'array' in example['audio']:
-                        print(f"Audio array type: {type(example['audio']['array'])}")
-                        print(f"Audio array shape: {example['audio']['array'].shape if hasattr(example['audio']['array'], 'shape') else 'No shape attribute'}")
-                    if isinstance(example['audio'], dict) and 'sampling_rate' in example['audio']:
-                        print(f"Audio sampling rate: {example['audio']['sampling_rate']}")
-                
-                # Get the audio waveform and sample rate directly from the array and sampling_rate fields
-                waveform = example['audio']['array']
-                sample_rate = example['audio']['sampling_rate']
-                transcript = example['transcript']
-                
-                # Tokenize the audio
-                audio_tokens = tokenise_audio(waveform, sample_rate)
-                
-                # Create self-reference example (same example as both reference and sample)
-                tokenized_prompt = create_tokenized_prompt(
-                    transcript, audio_tokens, transcript, audio_tokens
-                )
-                
-                processed_examples.append({
-                    'tokens': tokenized_prompt,
-                    'uuid': example['uuid'],
-                    'episode_id': speaker
-                })
-                
-            except Exception as e:
-                print(f"Error processing example from speaker {speaker}, index {idx}: {e}")
-                continue
-    
-    print(f"Processed {len(processed_examples)} examples")
-    
-    # Save the processed examples
-    output_path = f"{args.output_dir}/voice_cloning_processed.pt"
-    torch.save(processed_examples, output_path)
-    print(f"Processed data saved to {output_path}")
-    
-    # Let's create pairs with examples from the same speaker
+    # Create pairs with examples from the same speaker
     pairs_examples = []
     total_pairs_created = 0
     speakers_used = set()
+    first_prompt_printed = False
     
     # Process each speaker to create pairs
     for speaker in tqdm(sorted_speakers, desc="Creating pairs"):
@@ -245,13 +426,21 @@ def main():
                 sample_transcript = sample_example['transcript']
                 
                 # Tokenize
-                ref_audio_tokens = tokenise_audio(ref_waveform, ref_sample_rate)
-                sample_audio_tokens = tokenise_audio(sample_waveform, sample_sample_rate)
+                ref_audio_tokens = tokenise_audio(ref_waveform, ref_sample_rate, device)
+                sample_audio_tokens = tokenise_audio(sample_waveform, sample_sample_rate, device)
                 
                 # Create tokenized prompt
                 tokenized_prompt = create_tokenized_prompt(
                     ref_transcript, ref_audio_tokens, sample_transcript, sample_audio_tokens
                 )
+                
+                # Print tokenized prompt for debugging in test mode
+                if args.test and not first_prompt_printed:
+                    print(f"\n--- FULL EXAMPLE TOKENIZED PROMPT FOR SPEAKER {speaker} ---")
+                    print(f"Reference text: {ref_transcript}")
+                    print(f"Sample text: {sample_transcript}")
+                    print_tokenized_prompt(tokenized_prompt)
+                    first_prompt_printed = True
                 
                 pairs_examples.append({
                     'tokens': tokenized_prompt,
@@ -274,9 +463,36 @@ def main():
     print(f"Used {len(speakers_used)} unique speakers for pairs")
     
     # Save the pairs examples
-    pairs_output_path = f"{args.output_dir}/voice_cloning_pairs.pt"
-    torch.save(pairs_examples, pairs_output_path)
-    print(f"Paired data saved to {pairs_output_path}")
+    if total_pairs_created > 0:
+        # Convert to the required HuggingFace dataset format
+        
+        # Prepare data in the required format
+        hf_data = {
+            'input_ids': [],
+            'labels': [],
+            'attention_mask': []
+        }
+        
+        for example in pairs_examples:
+            tokens = example['tokens']
+            hf_data['input_ids'].append(tokens)
+            hf_data['labels'].append(tokens)  # Same as input_ids
+            hf_data['attention_mask'].append([1] * len(tokens))
+        
+        # Create HuggingFace dataset
+        hf_dataset = Dataset.from_dict(hf_data)
+        
+        # Save the dataset
+        output_path = f"{args.output_dir}/voice_cloning_dataset"
+        hf_dataset.save_to_disk(output_path)
+        print(f"HuggingFace dataset saved to {output_path}")
+        
+        # Also save the original pairs data for reference
+        torch_output_path = f"{args.output_dir}/voice_cloning_pairs.pt"
+        torch.save(pairs_examples, torch_output_path)
+        print(f"Original paired data also saved to {torch_output_path}")
+    else:
+        print("No pairs were created, skipping file save")
 
 if __name__ == "__main__":
     main()

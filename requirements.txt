@@ -8,3 +8,5 @@ librosa
 soundfile
 tqdm
 accelerate
+snac
+vllm

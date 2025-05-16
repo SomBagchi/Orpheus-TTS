@@ -143,13 +143,7 @@ def main():
     os.makedirs(SAMPLES_DIR, exist_ok=True)
     
     logger.info("Loading dataset...")
-    try:
-        dataset = load_dataset(DATASET_NAME, split=VAL_SUBSET)
-    except Exception as e:
-        # Try loading from disk if loading from HF fails
-        logger.info(f"Failed to load from HF, trying local disk: {e}")
-        from datasets import load_from_disk
-        dataset = load_from_disk(f"voice_cloning/{VAL_SUBSET}")
+    dataset = load_dataset(DATASET_NAME, split=VAL_SUBSET)
     
     logger.info(f"Loaded {len(dataset)} validation samples")
     

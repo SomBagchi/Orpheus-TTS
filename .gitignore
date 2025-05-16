@@ -6,3 +6,4 @@ voice_cloning_val/
 wandb/
 voice_cloning_test/
 voice_cloning/models/
+orpheus_tts_pypi/

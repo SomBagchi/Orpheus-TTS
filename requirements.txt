@@ -9,4 +9,4 @@ soundfile
 tqdm
 accelerate
 snac
-vllm
+vllm==0.7.3

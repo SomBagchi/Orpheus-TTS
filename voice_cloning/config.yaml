@@ -7,14 +7,15 @@ split: "train"
 model_name: "canopylabs/orpheus-tts-0.1-pretrained"
 
 # Training Args
-epochs: 3
+epochs: 1
 batch_size: 1
 eval_batch_size: 1
 number_processes: 1
 pad_token: 128263
-save_steps: 1000
+save_steps: 500
 logging_steps: 50
-keep_checkpoints: 1
+keep_checkpoints: 5
+eval_steps: 50
 
 # Optimizer config
 learning_rate: 2.0e-5

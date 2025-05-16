@@ -143,12 +143,17 @@ def main():
     os.makedirs(SAMPLES_DIR, exist_ok=True)
     
     logger.info("Loading dataset...")
-    dataset = load_dataset(DATASET_NAME, split=VAL_SUBSET)
+    dataset_dict = load_dataset(DATASET_NAME, VAL_SUBSET)
+    
+    # Get the appropriate split from the dataset dictionary
+    # Since we only have 'train' available, use that
+    dataset = dataset_dict['train']
     
     logger.info(f"Loaded {len(dataset)} validation samples")
     
-    # Select random samples
-    random_indices = random.sample(range(len(dataset)), NUM_SAMPLES)
+    # Select random samples (ensure we don't request more than available)
+    num_samples_to_use = min(NUM_SAMPLES, len(dataset))
+    random_indices = random.sample(range(len(dataset)), num_samples_to_use)
     selected_samples = [dataset[i] for i in random_indices]
     
     logger.info(f"Selected sample indices: {random_indices}")

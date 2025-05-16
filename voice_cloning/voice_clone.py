@@ -1,10 +1,13 @@
-from datasets import load_from_disk
-from transformers import AutoModelForCausalLM, Trainer, TrainingArguments, AutoTokenizer
+from datasets import load_from_disk, load_dataset
+from transformers import AutoModelForCausalLM, Trainer, TrainingArguments, AutoTokenizer, TrainerCallback
 import numpy as np
 import yaml
 import wandb
 import torch
 import argparse
+import os
+import glob
+import shutil
 
 # Add argument parsing
 parser = argparse.ArgumentParser(description="Voice cloning script")
@@ -16,8 +19,10 @@ config_file = "voice_cloning/config.yaml"
 with open(config_file, "r") as file:
     config = yaml.safe_load(file)
 
-train_ds = config["train_ds"]
-val_ds = config["val_ds"]
+dataset_name = config["dataset_name"]
+train_subset = config["train_subset"]
+val_subset = config["val_subset"]
+split = config["split"]
 
 model_name = config["model_name"]
 run_name = config["run_name"]
@@ -30,6 +35,7 @@ save_steps = config["save_steps"]
 pad_token = config["pad_token"]
 number_processes = config["number_processes"]
 learning_rate = config["learning_rate"]
+keep_checkpoints = config.get("keep_checkpoints", 1)  # Default to 1 if not specified
 
 # Load optimizer and scheduler config
 optimizer = config["optimizer"]
@@ -45,6 +51,39 @@ logging_steps = config["logging_steps"]
 # Loss masking parameters from config.yaml
 boosted_loss_weight = config["boosted_loss_weight"]
 boosted_token_count = config["boosted_token_count"]
+
+# Custom callback to clean up old checkpoints
+class CheckpointCleanupCallback(TrainerCallback):
+    def __init__(self, output_dir, keep_checkpoints=1):
+        self.output_dir = output_dir
+        self.keep_checkpoints = keep_checkpoints
+    
+    def on_save(self, args, state, control, **kwargs):
+        if self.keep_checkpoints <= 0:
+            return
+        
+        # Get all checkpoint directories
+        checkpoints = sorted(
+            glob.glob(os.path.join(self.output_dir, "checkpoint-*")),
+            key=lambda x: int(x.split("-")[-1])
+        )
+        
+        # If we have more checkpoints than we want to keep, remove the oldest ones
+        if len(checkpoints) > self.keep_checkpoints:
+            for checkpoint in checkpoints[:-self.keep_checkpoints]:
+                print(f"Removing old checkpoint: {checkpoint}")
+                try:
+                    shutil.rmtree(checkpoint)
+                except Exception as e:
+                    print(f"Error removing checkpoint {checkpoint}: {e}")
+        
+        # Print disk usage after cleanup
+        try:
+            import subprocess
+            result = subprocess.run(['df', '-h', '/'], capture_output=True, text=True)
+            print(f"Current disk usage after checkpoint cleanup:\n{result.stdout}")
+        except Exception as e:
+            print(f"Error checking disk usage: {e}")
 
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="flash_attention_2")
@@ -127,8 +166,9 @@ class SpeechMaskTrainer(Trainer):
         
         return (loss, outputs) if return_outputs else loss
 
-train_ds = load_from_disk(train_ds) 
-val_ds = load_from_disk(val_ds)
+# Load dataset from Hugging Face with the correct config name
+train_ds = load_dataset(dataset_name, train_subset, split=split)
+val_ds = load_dataset(dataset_name, val_subset, split=split)
 
 wandb.init(project=project_name, name=run_name)
 
@@ -164,11 +204,23 @@ trainer = SpeechMaskTrainer(
     data_collator=CustomDataCollator(tokenizer),
     boosted_weight=boosted_loss_weight,  
     boosted_count=boosted_token_count,   
+    callbacks=[CheckpointCleanupCallback(output_dir=f"./{base_repo_id}", keep_checkpoints=keep_checkpoints)]
 )
 
-trainer.train()
+# Print disk space before training
+try:
+    import subprocess
+    print("Disk space before training:")
+    subprocess.run(['df', '-h', '/'], check=True)
+except Exception as e:
+    print(f"Error checking disk space: {e}")
 
+# Move model to GPU before training
+model.to("cuda")
+
+trainer.train()
 trainer.evaluate()
 
 print("Training complete")
 
+print(f"Peak CUDA memory usage: {torch.cuda.max_memory_allocated() / 1024**2:.2f} MB")

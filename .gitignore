@@ -4,3 +4,4 @@ voice_cloning_pairs.pt
 voice_cloning_train/
 voice_cloning_val/
 wandb/
+voice_cloning_test/

@@ -1,4 +1,5 @@
-TTS_dataset: "voice_cloning_train"
+train_ds: "voice_cloning_test/voice_cloning_train"
+val_ds: "voice_cloning_test/voice_cloning_val"
 
 model_name: "canopylabs/orpheus-tts-0.1-pretrained"
 
@@ -7,10 +8,27 @@ epochs: 3
 batch_size: 1
 number_processes: 1
 pad_token: 128263
-save_steps: 5000
-learning_rate: 5.0e-5
+save_steps: 500
+logging_steps: 50
+
+# Optimizer config
+learning_rate: 2.0e-5
+optimizer: "adamw_torch"
+betas: [0.9, 0.999]
+epsilon: 1.0e-8
+weight_decay: 0.01
+
+# Scheduler config
+lr_scheduler_type: "linear"
+warmup_steps: 300
+max_grad_norm: 1.0
+gradient_accumulation_steps: 1
+
+# Loss masking parameters
+boosted_loss_weight: 5.0  # Weight for the first N tokens after start of speech
+boosted_token_count: 7    # Number of tokens to apply the boosted weight to
 
 # Naming and paths
-save_folder: "voice_cloning/models"
-project_name: "voice-cloning"
-run_name: "voice-cloning"
+save_folder: "voice_cloning_test/models"
+project_name: "voice-cloning-test"
+run_name: "voice-cloning-test"

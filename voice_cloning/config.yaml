@@ -1,5 +1,5 @@
-train_ds: "voice_cloning_test/voice_cloning_train"
-val_ds: "voice_cloning_test/voice_cloning_val"
+train_ds: "voice_cloning/voice_cloning_train"
+val_ds: "voice_cloning/voice_cloning_val"
 
 model_name: "canopylabs/orpheus-tts-0.1-pretrained"
 
@@ -29,6 +29,6 @@ boosted_loss_weight: 5.0  # Weight for the first N tokens after start of speech
 boosted_token_count: 7    # Number of tokens to apply the boosted weight to
 
 # Naming and paths
-save_folder: "voice_cloning_test/models"
-project_name: "voice-cloning-test"
-run_name: "voice-cloning-test"
+save_folder: "voice_cloning/models"
+project_name: "voice-cloning_real"
+run_name: "voice-cloning_real"

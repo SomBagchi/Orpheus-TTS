@@ -22,7 +22,7 @@ weight_decay: 0.01
 lr_scheduler_type: "linear"
 warmup_steps: 300
 max_grad_norm: 1.0
-gradient_accumulation_steps: 1
+gradient_accumulation_steps: 8
 
 # Loss masking parameters
 boosted_loss_weight: 5.0  # Weight for the first N tokens after start of speech

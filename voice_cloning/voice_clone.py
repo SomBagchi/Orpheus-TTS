@@ -48,6 +48,9 @@ boosted_token_count = config["boosted_token_count"]
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="flash_attention_2")
 
+# Enable gradient checkpointing to reduce memory usage
+model.gradient_checkpointing_enable()
+
 # Custom data collator to preserve start_of_speech_pos
 class CustomDataCollator:
     def __init__(self, tokenizer):
